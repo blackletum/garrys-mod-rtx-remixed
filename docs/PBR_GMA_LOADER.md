@@ -32,11 +32,20 @@ cmake --build build/startup --config Release --parallel
 ctest --test-dir build/startup -C Release --output-on-failure
 ```
 
-The regular **Build** workflow produces the client module in `windows-x64`.
-**PBR GMA loader contracts** produces `pbr-gma-startup-x64`. The startup artifact
-contains the wrapper, offline preparation tool and renderer contract; it does
-not contain or replace the real Remix renderer. The fake renderer is test-only
-and is never packaged.
+The regular **Build** workflow produces the client module and the startup loader
+in `windows-x64`, and includes both in the nightly release ZIP. Startup files are
+staged under `bin/win64/astra-startup/` so extracting the fixes package cannot
+overwrite the Remix renderer. RTXLauncher versions with startup-loader support
+verify the renderer contract after installing either package, preserve the real
+renderer as `d3d9_astra_renderer.dll`, and install the wrapper as `d3d9.dll`.
+Older launchers leave the staged files inactive; use the manual steps below or
+update the launcher. Enabling Workshop mounting alone does not install the loader.
+
+**PBR GMA loader contracts** also produces `pbr-gma-startup-x64` for manual
+installation. Both artifacts contain the wrapper, offline preparation tool and
+renderer contract. Neither contains the real Remix renderer or the fake test
+renderer. Keep the staged files when upgrading: the launcher rechecks the actual
+renderer and leaves an unsupported renderer unwrapped, with a progress warning.
 
 ## Installation
 
@@ -57,8 +66,18 @@ must not be installed with that renderer. Developers supporting another renderer
 must audit it, regenerate the contract, rebuild and test that combination.
 
 The recorded renderer SHA-256 is
-`6874ba37d27f6c4f88c7ddbbd513f5fe028f14fbe6bbc402e9a309ba835d0356`.
+`b2e687406b9b24e669d21cb0eebee26f55585c60666ceeb08863b32f14346c62`
+(265,998,848 bytes, `sambow23/dxvk-remix-gmod` nightly `12759b3`, the renderer
+installed by RTXLauncher during fresh-install testing). Its export names and
+ordinals match the previous audited renderer; RVAs and the file digest changed.
 Its 146 original exports are preserved; the proxy adds two startup exports.
+
+The default `dxvk.conf` disables RTX IO for this renderer. In the Cathedral
+Workshop test, enabling it stalled the render thread during texture uploads;
+disabling it allowed the scene to render. The prepared DDS files use the normal
+texture-streaming path. This is a compatibility default, not a fix inside RTX IO.
+Mods using RTX IO compressed packages need a renderer that supports those
+packages without the stall before re-enabling `rtx.io.enabled`.
 
 Install these components after the check succeeds:
 
@@ -130,6 +149,11 @@ become content-addressed `textures/<sha256>.dds` files outside the GMA. Existing
 compressed mip data passes through unchanged. See the native test fixtures for
 executable package examples.
 
+Layers can reference Remix's built-in `AperturePBR_Opacity.mdl` and
+`AperturePBR_Translucent.mdl` by those exact names. Relative MDL paths and
+addon-supplied shader modules remain rejected. This permits opaque and
+translucent PBR map materials without bundling renderer shader files.
+
 The owned output is `rtx-remix/mods/!astra_startup_<map>/`. Paths, descriptors,
 duplicate members, declared hash ownership and layer dependencies are checked.
 The visible root is committed only after its dependencies verify. Invalid,
@@ -199,3 +223,20 @@ preparation to deactivate stale startup roots (also remove any relevant loose
 game `data_static` package). Then restore the backed-up original renderer.
 Keep any deactivation failure visible and resolve it before restoring a renderer
 that would otherwise continue to load stale layers.
+
+## Coexisting map addons
+
+An addon must validate its current-map manifest before acquiring a native
+provider or clearing replacements. An absent manifest means that loader has no
+work on this map; it must not require legacy batch APIs just to become inactive.
+The startup-only bridge deliberately does not expose `BeginBatch` or a live
+writer. A malformed manifest or failed cleanup must remain an error, rather than
+being reported as a successful handoff.
+
+Shared Lua loaders that coordinate through `reset_complete` should report
+`no_map_manifest` and completion when they own nothing, without calling
+`ClearAllOwned`. Once they acquire resources, they must release only their own
+resources before yielding to another loader. This avoids an unrelated subscribed
+PBR map blocking the active map on a clean client. Existing Workshop loaders may
+need an addon update; packaging the native startup loader cannot repair arbitrary
+third-party Lua ownership logic.
